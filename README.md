@@ -4,6 +4,27 @@ Aftermarket firmware for Dyson V11/V15 Battery Management Systems.
 
 Based on https://github.com/davidmpye/V10_Dyson_BMS and https://github.com/vladislav1983/V11_Dyson_BMS
 
+## This Fork
+
+This is Patrick Reybaud's fork of
+[biospb/V11_Dyson_BMS](https://github.com/biospb/V11_Dyson_BMS), which brings
+cell balancing. It adds:
+
+- **Trigger mode 3, the default here.** Two short presses keep the motor
+  running, a single press stops it, and a press from stopped runs it while
+  held, as stock. See `TRIGGER_TOGGLE_MODE` below.
+- **Weak cell detection.** A cell that keeps drifting low between charges is
+  reported instead of being silently chased by the balancer. See
+  [Weak Cell Detection](#weak-cell-detection).
+- **A field report on a locked V15 (SV22) pack**: diagnosis from the stock
+  firmware's log, wiring, and flashing with a Black Magic Probe, including a
+  workaround for GDB failing on a protected SAMD20.
+  See [doc/v15-sv22](doc/v15-sv22/README.md).
+
+It has been flashed and booted on one V15 SV22 pack. Use on the vacuum is
+covered by the upstream projects; the changes above are covered by
+`python3 tests/host_regressions.py`.
+
 By using this project, you acknowledge and agree to the following:
 
 The author and contributors are NOT responsible for any damage, injury,
@@ -136,7 +157,7 @@ faults, and runtime calculation retains precision before its final division.
 
 | Define | Default | Purpose |
 |--------|---------|---------|
-| `TRIGGER_TOGGLE_MODE` | `2` | Trigger behaviour. `0` = momentary (hold to run, the V11/V15 behaviour). `1` = toggle (each press flips run/stop; hold past `TRIGGER_HOLD_MS` to force stop). `2` = hybrid, see [Trigger](#trigger). Set to `1` for the Dyson V12, whose trigger is a click-to-latch button rather than a held switch. |
+| `TRIGGER_TOGGLE_MODE` | `2` | Trigger behaviour. `0` = momentary (hold to run, the V11/V15 behaviour). `1` = toggle (each press flips run/stop; hold past `TRIGGER_HOLD_MS` to force stop). `2` = hybrid, see [Trigger](#trigger). `3` = double tap: two short presses latch the motor on, one press stops it, a press from stopped runs it while held. Set to `1` for the Dyson V12, whose trigger is a click-to-latch button rather than a held switch. |
 | `PACK_MAX_CAPACITY_MAH` | `4000` | Capacity of ONE fitted cell (the pack is 7S1P). Only a starting point - the first full cycle learns the real figure within 30%..120% of it (1200..4800 mAh at 4000). Also seeds the defaults; the cleaner receives the learned full-charge capacity. Original Dyson cells are 3600. |
 | `CELL_BALANCE_ENABLE` | `1` | Passive cell balancing on the dock, see [Cell Balancing](#cell-balancing). `0` compiles it out. |
 | `SHIP_MODE_ENABLE` | `1` | `0` keeps the pack from ever entering SHIP mode - a bench setting, see [Sleep and Wake](#sleep-and-wake). |
@@ -595,6 +616,19 @@ and on one pack they differed by 13 mV). Lowering them further to make a
 healthy pack "do something" makes it bleed good cells to chase an instrument
 error - see the comment in `config.h`.
 
+## Weak Cell Detection
+
+Balancing hides a leaking cell: it bleeds the healthy cells down to it every
+night without complaint. Once a balancing has finished, the next charge should
+open with the cells still together near full; a spread of at least
+`CELL_WEAK_REGROW_MV` (40 mV, about 100 mAh) there is drift between charges.
+The low cell is logged as `BMS:BAL_DRIFT c<n> d=<mV> n=<count>`, and the same
+cell `CELL_WEAK_CYCLES` (2) charges in a row is reported as `BMS:WEAK_CELL`,
+with six blinks of the right LED when the pack is docked. A charge that opens
+balanced clears it. Cell numbers are the firmware's 0-based indices, as in
+`BMS:BAL_OV`. The tracker lives in the emulated EEPROM, so the layout revision
+is 3 and the first boot after flashing resets the gauge.
+
 ## Storage Mode
 
 A docked pack whose motor has not run for `STORAGE_IDLE_WAKES` standby periods
@@ -704,4 +738,7 @@ the cells being bled; compare with a meter after `BMS:BAL_DONE`.
 
 ## License
 
-GNU GPL v3 or later
+GNU GPL v3 or later - see [LICENSE](LICENSE).
+
+Copyright the authors of the projects this is based on, and (C) 2026
+Patrick Reybaud for the changes in this fork.

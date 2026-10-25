@@ -15,3 +15,11 @@ Their project is [here](https://github.com/LibreSolar/bq769x0-arduino-library/)
 Many thanks!
 
 David Pye
+
+## This fork
+
+* biospb, for the cell balancing this fork builds on - [biospb/V11_Dyson_BMS](https://github.com/biospb/V11_Dyson_BMS)
+* Vladislav Gyurov, for the V11/V15 firmware and protocol work - [vladislav1983/V11_Dyson_BMS](https://github.com/vladislav1983/V11_Dyson_BMS)
+* David Pye, for the V10 firmware all of this started from - [davidmpye/V10_Dyson_BMS](https://github.com/davidmpye/V10_Dyson_BMS)
+
+Patrick Reybaud

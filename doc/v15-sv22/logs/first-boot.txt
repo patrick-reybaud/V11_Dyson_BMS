@@ -1,0 +1,11 @@
+BMS:DEBUGGER_SEEN - unplug the programmer, sleeping after one more idle period
+BMS_STATE: INIT
+Dyson V11/V15 BMS After market firmware 24e0167+
+BMS:DEBUGGER_SEEN since power-up - if still plugged in, sleep will misbehave
+V: 4074 4024 4059 4009 4042 4056 4049 mV P: 28313 mV (cached)
+TEMP(boot) PA07=19.4 PA08=20.7 'C  CHG_FB=1674
+C: 2000 mAh
+BMS_STATE: IDLE
+BMS:DEBUGGER_SEEN - unplug the programmer, sleeping after one more idle period
+BMS_STATE: SLEEP
+BMS:GOING_TO_SLEEP

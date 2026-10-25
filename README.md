@@ -21,8 +21,8 @@ cell balancing. It adds:
   workaround for GDB failing on a protected SAMD20.
   See [doc/v15-sv22](doc/v15-sv22/README.md).
 
-It has been flashed and booted on one V15 SV22 pack. Use on the vacuum is
-covered by the upstream projects; the changes above are covered by
+It runs on one V15 SV22 pack: motor, trigger gestures and charging work on
+the vacuum. The changes above are also covered by
 `python3 tests/host_regressions.py`.
 
 By using this project, you acknowledge and agree to the following:

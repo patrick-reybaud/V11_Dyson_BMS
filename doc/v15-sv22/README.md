@@ -169,4 +169,5 @@ cannot be read out first while the security bit is set.
 | Boot, seven cells, pack voltage, both temperature sensors | OK |
 | Sleep when idle | OK |
 | Trigger mode 3 and weak-cell detection, host tests | OK (`tests/host_regressions.py`) |
-| Motor, trigger gestures, charging on the vacuum | not yet reported |
+| Motor, trigger gestures, charging on the vacuum | OK |
+| Gauge calibration, balancing over several nights, weak-cell tracking over time | in progress |

@@ -149,8 +149,10 @@ add_link_options(
     # 4KB idle above it. .data + .bss are ~1.7KB, so 2KB fits with room to
     # spare, and the deepest path (fault handler -> delay -> protocol ->
     # nested delay -> protocol -> frame parse, each with a 128B print buffer)
-    # was within 1KB but not by much.
-    -Wl,--defsym,STACK_SIZE=0x800
+    # was within 1KB but not by much. .data + .bss have since grown to fill
+    # the other 2KB exactly, so 64 bytes come back from the stack: 1984 bytes
+    # is still almost twice the deepest path above.
+    -Wl,--defsym,STACK_SIZE=0x7C0
     -T${LINKER_SCRIPT}
     --specs=nano.specs
     --specs=nosys.specs

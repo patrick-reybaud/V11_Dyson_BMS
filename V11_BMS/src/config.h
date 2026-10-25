@@ -286,6 +286,12 @@
 //   0  stock - the motor runs while the trigger is physically held
 //   1  latch - a press toggles; holding past TRIGGER_HOLD_MS clears the latch
 //   2  hybrid - a short press toggles, a long press behaves exactly like 0
+//   3  double tap - two short presses latch the motor on, a single press
+//      stops it; from stopped, a press runs it while held, exactly like 0
+//
+// Mode 3 keeps the stock gesture for everything but the latch, so a single
+// accidental tap can no longer leave the motor running, and stopping a latched
+// motor takes one press of any length.
 //
 // Mode 2 is the default because it is a superset rather than a replacement: a
 // quick tap leaves the motor running, while pressing and holding runs it only
@@ -293,9 +299,13 @@
 // the one the hand already knows. Neither gesture has to be learned at the
 // expense of the other, and a long press always ends with the latch clear, so
 // it doubles as the way out of one set by accident.
-#define TRIGGER_TOGGLE_MODE                 2
+#define TRIGGER_TOGGLE_MODE                 3
 // How long a press has to last to count as "held" rather than "tapped".
 #define TRIGGER_HOLD_MS                     400
+// Mode 3: longest gap between the release of the first tap and the second
+// press. The motor keeps running through the gap, so a double tap does not
+// stutter it, and a single tap runs it this much longer than the press.
+#define TRIGGER_DOUBLE_TAP_MS               400
 // Longest the motor runs on a latch (modes 1 and 2) before it is dropped, so a
 // cleaner put down with the motor latched on does not run the pack flat. A
 // trigger physically held at that moment keeps the motor running. The latch
@@ -391,6 +401,19 @@
 // still strand the pack after three hours. It also stops a fault/recovery
 // cycle inheriting an already-exhausted counter.
 #define BQ_AFE_FAULT_DECAY_MS               (10 * 60 * 1000ul)
+
+// Weak-cell detection. Near the top of charge, cells of different capacity
+// still meet once the pack is balanced; what reopens a spread there between
+// two charges is one cell losing charge faster than the rest - self-discharge,
+// a leak. The balancer would follow such a cell down without a word, bleeding
+// the six good ones every night. So when the previous balancing finished and
+// the next charge opens with a spread of at least CELL_WEAK_REGROW_MV, the low
+// cell is noted; the same cell CELL_WEAK_CYCLES charges in a row is reported
+// as BMS:WEAK_CELL, and the right LED blinks when the pack is docked.
+// 40mV near full is ~100mAh - months of drift for a healthy cell, days for a
+// leaking one. Each charge between two runs of the motor counts once.
+#define CELL_WEAK_REGROW_MV                 40      //mV
+#define CELL_WEAK_CYCLES                    2
 
 // How often the balancing decision is re-evaluated.
 #define CELL_BALANCE_PERIOD_MS              10000

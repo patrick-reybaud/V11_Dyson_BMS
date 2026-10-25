@@ -128,6 +128,7 @@ typedef struct
   uint16_t v_max_mv;
   uint16_t spread_mv;
   uint8_t  max_cell;     // index of the highest cell
+  uint8_t  min_cell;     // index of the lowest cell
   uint8_t  cell_mask;    // bit n set = cell n is bleeding
   uint8_t  num_cells;    // popcount of cell_mask
 } bq7693_balance_status_t;

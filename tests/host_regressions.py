@@ -12,6 +12,12 @@ import tempfile
 SRC = Path(__file__).resolve().parents[1] / "V11_BMS" / "src"
 
 
+def weak_cell_macros():
+    """The WEAK_CELL_* helpers, taken from the header so the stubs cannot drift."""
+    header = (SRC / "eeprom_handler.h").read_text()
+    return "\n".join(re.findall(r"^#define WEAK_CELL_\w+(?:.*\\\n)*.*", header, re.M)) + "\n"
+
+
 def function(file, name):
     source = (SRC / file).read_text()
     match = re.search(r"^[\w *]+\b" + name + r"\([^;]*?\)\n\{", source, re.M)
@@ -125,13 +131,13 @@ int main(void) {
 
 EEPROM = r'''
 #define EEPROM_PAGE_SIZE 60
-#define EEPROM_MAGIC 0x424D5302u
+#define EEPROM_MAGIC 0x424D5303u
 #define STATUS_OK 0
 enum eeprom_write_result { EEPROM_WRITE_FAILED=-1, EEPROM_UNCHANGED, EEPROM_WRITTEN };
 struct eeprom_data {
   uint32_t magic;
   int32_t total_pack_capacity, current_charge_level;
-  uint32_t full_discharge_seen, idle_wakes, crc32;
+  uint32_t full_discharge_seen, idle_wakes, weak_cell, crc32;
 };
 static volatile struct eeprom_data eeprom_data;
 static struct eeprom_data eeprom_shadow;
@@ -160,6 +166,7 @@ int main(void) {
   eeprom_data.current_charge_level = 2200000; // upward learning must survive reboot
   eeprom_data.full_discharge_seen = 1;
   eeprom_data.idle_wakes = STORAGE_IDLE_WAKES + 10;
+  eeprom_data.weak_cell = 0x12345678u; // nonsense tracker: reset, gauge kept
   eeprom_data_valid = true;
   corrupt_commits = 1;
   assert(eeprom_write() == EEPROM_WRITTEN && writes == 2);
@@ -167,9 +174,14 @@ int main(void) {
   assert(eeprom_data.total_pack_capacity == 2000000);
   assert(eeprom_data.current_charge_level == 2200000);
   assert(eeprom_data.idle_wakes == STORAGE_IDLE_WAKES);
+  assert(eeprom_data.weak_cell == WEAK_CELL_DEFAULT);
   assert(eeprom_write() == EEPROM_WRITTEN); // normalization reaches flash
   int before = writes;
   assert(eeprom_write() == EEPROM_UNCHANGED && writes == before);
+  eeprom_data.weak_cell = WEAK_CELL_MAKE(4, 1, 0); // a tracker change alone is stored
+  assert(eeprom_write() == EEPROM_WRITTEN && writes == before + 1);
+  assert(eeprom_read() == 0 && eeprom_data.weak_cell == WEAK_CELL_MAKE(4, 1, 0));
+  before = writes;
   eeprom_data.current_charge_level += 100000;
   corrupt_commits = 3;
   assert(eeprom_write() == EEPROM_WRITE_FAILED && writes == before + 3);
@@ -238,6 +250,131 @@ int main(void) {
   for (int i=0; i<7; ++i) voltages[i]=CELL_STORAGE_RELEASE_VOLTAGE;
   for (int i=0; i<3; ++i) { now+=CHARGE_NO_CURRENT_TIMEOUT_MS; noflow_step(); }
   assert(taper_complete);
+}
+'''
+
+
+TRIGGER = r'''
+#define BMS_PRINT(...) ((void)0)
+typedef uint32_t sw_timer;
+static uint32_t now = 1;
+static void sw_timer_start(sw_timer *t) { *t = now; }
+static bool sw_timer_is_elapsed(sw_timer *t, uint32_t timeout) {
+  if (*t == 0) return true;
+  if (now - *t >= timeout) { *t = 0; return true; }
+  return false;
+}
+enum { DIO_TRIGGER_PRESSED, DIO_CHARGER_CONNECTED };
+static uint8_t trigger, charger;
+static bool vacuum = true;
+static uint8_t dio_read(int pin) { return pin == DIO_TRIGGER_PRESSED ? trigger : charger; }
+static bool dsn_prot_get_vacuum_connected(void) { return vacuum; }
+static bool     bms_trigger_latched;
+static sw_timer bms_trigger_latch_timer;
+static bool     bms_trigger_tap_pending;
+static sw_timer bms_trigger_tap_timer;
+static bool     bms_trigger_swallow;
+static bool bms_trigger_active(void);
+'''
+TRIGGER_MAIN = r'''
+/* The 50ms main loop, trigger held at level for ms; returns the last answer. */
+static bool run(uint32_t ms, uint8_t level, bool *ever_off) {
+  bool motor = false;
+  trigger = level;
+  for (uint32_t t = 0; t < ms; t += 50) {
+    now += 50;
+    motor = bms_trigger_active();
+    if (ever_off && !motor) *ever_off = true;
+  }
+  return motor;
+}
+static void settle(void) { run(2000, 0, NULL); bms_trigger_latch_clear(); run(500, 0, NULL); }
+static void double_tap(bool *ever_off) { run(150, 1, ever_off); run(150, 0, ever_off); run(150, 1, ever_off); run(100, 0, ever_off); }
+int main(void) {
+  assert(TRIGGER_TOGGLE_MODE == 3 && TRIGGER_DOUBLE_TAP_MS == 400);
+  bool off;
+  settle();                                                     // hold: stock behaviour
+  assert(run(100, 1, NULL) && run(1000, 1, NULL));
+  assert(!run(50, 0, NULL) && !bms_trigger_latched);
+  settle();                                                     // one tap: runs through the window, then stops
+  run(150, 1, NULL);
+  assert(run(100, 0, NULL));
+  assert(!run(500, 0, NULL) && !bms_trigger_latched);
+  settle(); off = false;                                        // double tap latches without a stutter
+  double_tap(&off);
+  assert(bms_trigger_latched && !off && run(5000, 0, NULL));
+  assert(!run(50, 1, NULL));                                    // one press stops at once...
+  assert(!run(1500, 1, NULL));                                  // ...holding it does not restart...
+  assert(!run(50, 0, NULL) && !run(1000, 0, NULL));             // ...nor does letting go
+  settle();
+  assert(run(100, 1, NULL));                                    // and the next press runs again
+  run(50, 0, NULL); settle();                                   // tap then hold: no latch
+  run(150, 1, NULL); run(150, 0, NULL); run(600, 1, NULL); run(50, 0, NULL);
+  assert(!bms_trigger_latched && !run(500, 0, NULL));
+  settle();                                                     // taps too far apart: no latch
+  run(150, 1, NULL); run(600, 0, NULL); run(150, 1, NULL); run(100, 0, NULL);
+  assert(!bms_trigger_latched);
+  settle(); double_tap(NULL);                                   // latch dropped by a charger...
+  charger = 1; assert(!run(100, 0, NULL)); charger = 0;
+  settle(); double_tap(NULL);                                   // ...a cleaner going away...
+  vacuum = false; assert(!run(100, 0, NULL)); vacuum = true;
+  settle(); double_tap(NULL);                                   // ...and TRIGGER_LATCH_MAX_MS
+  assert(!run(TRIGGER_LATCH_MAX_MS + 60000ul, 0, NULL));
+  settle();                                                     // a fault inside the tap window stops it
+  run(150, 1, NULL); run(100, 0, NULL); bms_trigger_latch_clear();
+  assert(!run(50, 0, NULL));
+}
+'''
+
+
+WEAK = r'''
+#define BMS_PRINT(...) ((void)0)
+typedef enum { BQ_BALANCE_IDLE, BQ_BALANCE_ACTIVE, BQ_BALANCE_TOO_LOW, BQ_BALANCE_CELL_FAIL,
+               BQ_BALANCE_OV, BQ_BALANCE_TOO_HOT } bq7693_balance_state_t;
+typedef struct { bq7693_balance_state_t state; uint16_t v_min_mv, v_max_mv, spread_mv;
+                 uint8_t max_cell, min_cell, cell_mask, num_cells; } bq7693_balance_status_t;
+enum eeprom_write_result { EEPROM_WRITE_FAILED=-1, EEPROM_UNCHANGED, EEPROM_WRITTEN };
+enum { LEDS_LED_ERR_LEFT, LEDS_LED_ERR_RIGHT, LEDS_NUM };
+static struct { uint32_t weak_cell; } eeprom_data = { WEAK_CELL_DEFAULT };
+static int writes, blinks;
+static enum eeprom_write_result eeprom_write(void) { writes++; return EEPROM_WRITTEN; }
+static void leds_blink_leds_num(int led, uint32_t num, uint32_t ms) {
+  assert(led == LEDS_LED_ERR_RIGHT); (void)ms; blinks += (int)num;
+}
+static bool bms_weak_cell_judged;
+'''
+WEAK_MAIN = r'''
+static bq7693_balance_status_t st;
+static void charge(bq7693_balance_state_t state, uint8_t cell, uint16_t spread) {
+  st.state = state; st.min_cell = cell; st.spread_mv = spread;
+  bms_weak_cell_track(&st);
+}
+static void use(void) { bms_weak_cell_judged = false; }
+#define CELL  WEAK_CELL_GET_CELL(eeprom_data.weak_cell)
+#define COUNT WEAK_CELL_GET_COUNT(eeprom_data.weak_cell)
+int main(void) {
+  charge(BQ_BALANCE_ACTIVE, 4, 250); use();                     // a big imbalance still being worked off
+  charge(BQ_BALANCE_ACTIVE, 4, 200); use();
+  charge(BQ_BALANCE_ACTIVE, 4, 120);
+  assert(COUNT == 0);
+  charge(BQ_BALANCE_IDLE, 4, 18);                               // finished: the next charge measures drift
+  assert(WEAK_CELL_BALANCED(eeprom_data.weak_cell));
+  use(); charge(BQ_BALANCE_ACTIVE, 4, CELL_WEAK_REGROW_MV - 10); charge(BQ_BALANCE_IDLE, 4, 18);
+  assert(COUNT == 0);                                           // small drift: healthy
+  use(); charge(BQ_BALANCE_ACTIVE, 4, 70); charge(BQ_BALANCE_IDLE, 4, 18);
+  assert(CELL == 4 && COUNT == 1);
+  bms_weak_cell_report(); assert(blinks == 0);
+  use(); charge(BQ_BALANCE_ACTIVE, 4, 65);
+  assert(CELL == 4 && COUNT == CELL_WEAK_CYCLES);
+  bms_weak_cell_report(); assert(blinks == 6);
+  charge(BQ_BALANCE_IDLE, 4, 18); use(); charge(BQ_BALANCE_IDLE, 4, 15);
+  assert(CELL == WEAK_CELL_NONE && COUNT == 0);                 // opening balanced clears it
+  use(); charge(BQ_BALANCE_ACTIVE, 2, 60); charge(BQ_BALANCE_IDLE, 2, 18);
+  use(); charge(BQ_BALANCE_ACTIVE, 5, 60);
+  assert(CELL == 5 && COUNT == 1);                              // a different cell starts over
+  int before = writes;
+  charge(BQ_BALANCE_ACTIVE, 5, 60); charge(BQ_BALANCE_TOO_HOT, 5, 60);
+  assert(writes == before);                                     // one verdict per charge
 }
 '''
 
@@ -344,10 +481,15 @@ def main():
                              "bq7693_get_cached_pack_voltage")], CACHE_MAIN),
         "temperature": (TEMPERATURE, [function("bms.c", "bms_sample_temperatures")], TEMPERATURE_MAIN),
         "soc": (SOC, [function("bms.c", "bms_get_soc_x100")], SOC_MAIN),
-        "eeprom": (EEPROM, [function("eeprom_handler.c", name) for name in
+        "eeprom": (weak_cell_macros() + EEPROM, [function("eeprom_handler.c", name) for name in
                               ("eeprom_read", "eeprom_write")], EEPROM_MAIN),
         "noflow": (NOFLOW, [function("bms.c", "bms_stop_charging"), noflow_function()], NOFLOW_MAIN),
         "empty_learning": (EMPTY, [empty_function()], EMPTY_MAIN),
+        "trigger": (TRIGGER, [function("bms.c", name) for name in
+                                ("bms_trigger_latch_set", "bms_trigger_latch_clear",
+                                 "bms_trigger_latch_expire", "bms_trigger_active")], TRIGGER_MAIN),
+        "weak_cell": (weak_cell_macros() + WEAK, [function("bms.c", name) for name in
+                                ("bms_weak_cell_track", "bms_weak_cell_report")], WEAK_MAIN),
         "logging": (LOGGING, [(SRC / "tiny_printf.c").read_text(),
                                *[function("serial_debug.c", name) for name in
                                  ("serial_debug_printf", "serial_debug_send_cell_voltages",

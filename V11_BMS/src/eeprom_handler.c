@@ -50,6 +50,7 @@ enum eeprom_write_result eeprom_write_defaults(void)
   eeprom_data.current_charge_level     = ((PACK_MAX_CAPACITY_MAH / 2) * 1000ul);
   eeprom_data.full_discharge_seen      = 0;
   eeprom_data.idle_wakes               = 0;
+  eeprom_data.weak_cell                = WEAK_CELL_DEFAULT;
   eeprom_data_valid = true;
   return eeprom_write();
 }
@@ -159,6 +160,13 @@ int eeprom_read(void)
   if (eeprom_data.idle_wakes > STORAGE_IDLE_WAKES)
     eeprom_data.idle_wakes = STORAGE_IDLE_WAKES;
 
+  /* Diagnostic only - a tracker that makes no sense is restarted, it never
+     costs the learned gauge. */
+  if ((eeprom_data.weak_cell >> 17) != 0u
+      || (WEAK_CELL_GET_CELL(eeprom_data.weak_cell) >= 7u   // BQ7693_NUM_CELLS
+          && WEAK_CELL_GET_CELL(eeprom_data.weak_cell) != WEAK_CELL_NONE))
+    eeprom_data.weak_cell = WEAK_CELL_DEFAULT;
+
   //What we just read is, by definition, what is stored.
   eeprom_shadow_valid = true;
   eeprom_ok = true;
@@ -205,7 +213,8 @@ enum eeprom_write_result eeprom_write(void)
   if (eeprom_ok && eeprom_shadow_valid
       && (eeprom_data.total_pack_capacity == eeprom_shadow.total_pack_capacity)
       && (eeprom_data.full_discharge_seen == eeprom_shadow.full_discharge_seen)
-      && (eeprom_data.idle_wakes          == eeprom_shadow.idle_wakes))
+      && (eeprom_data.idle_wakes          == eeprom_shadow.idle_wakes)
+      && (eeprom_data.weak_cell           == eeprom_shadow.weak_cell))
   {
     int32_t drift = eeprom_data.current_charge_level - eeprom_shadow.current_charge_level;
 
@@ -247,6 +256,7 @@ enum eeprom_write_result eeprom_write(void)
   eeprom_shadow.current_charge_level = eeprom_data.current_charge_level;
   eeprom_shadow.full_discharge_seen  = eeprom_data.full_discharge_seen;
   eeprom_shadow.idle_wakes           = eeprom_data.idle_wakes;
+  eeprom_shadow.weak_cell            = eeprom_data.weak_cell;
   eeprom_shadow_valid = true;
   return EEPROM_WRITTEN;
 }

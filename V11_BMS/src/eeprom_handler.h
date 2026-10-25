@@ -37,7 +37,7 @@
  * fuse, which the programmer does not touch, so stored data survives a
  * reflash - including a charge level a fault zeroed on the way down.
  */
-#define EEPROM_MAGIC  0x424D5302ul   /* 'B','M','S', layout revision 2 */
+#define EEPROM_MAGIC  0x424D5303ul   /* 'B','M','S', layout revision 3 */
 
 /*
  * A struct to represent the stored eeprom data.
@@ -61,8 +61,23 @@ struct eeprom_data
   int32_t  current_charge_level;  //micro-amp-hours
   uint32_t full_discharge_seen;   //capacity calibration flag
   uint32_t idle_wakes;            //standby wakes with no use - see STORAGE_IDLE_WAKES
+  uint32_t weak_cell;             //weak-cell tracker, see the WEAK_CELL_* macros below
   uint32_t crc32;
 } ;
+
+/*
+ * weak_cell packs three bytes so the field stays four wide (see above):
+ *   bits 0..7    lowest cell on the last re-imbalanced cycle, WEAK_CELL_NONE if none
+ *   bits 8..15   consecutive cycles that cell came back low, see CELL_WEAK_CYCLES
+ *   bit  16      the previous balancing finished, so the next spread is new drift
+ */
+#define WEAK_CELL_NONE              0xFFu
+#define WEAK_CELL_DEFAULT           0x000000FFul
+#define WEAK_CELL_GET_CELL(w)       ((uint8_t)((w) & 0xFFu))
+#define WEAK_CELL_GET_COUNT(w)      ((uint8_t)(((w) >> 8) & 0xFFu))
+#define WEAK_CELL_BALANCED(w)       (((w) >> 16) & 1u)
+#define WEAK_CELL_MAKE(cell, count, balanced) \
+  ((uint32_t)(cell) | ((uint32_t)(count) << 8) | ((uint32_t)((balanced) ? 1u : 0u) << 16))
 
 extern int eeprom_init(void);
 extern int eeprom_read(void);

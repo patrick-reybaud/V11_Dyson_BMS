@@ -745,6 +745,7 @@ bool bq7693_balance_update(bq7693_balance_status_t *status)
   uint16_t  v_min = 0xFFFF;
   uint16_t  v_max = 0;
   uint8_t   max_cell = 0;
+  uint8_t   min_cell = 0;
   uint8_t   selected = 0;
   uint8_t   reg1 = 0;
   uint8_t   reg2 = 0;
@@ -754,7 +755,10 @@ bool bq7693_balance_update(bq7693_balance_status_t *status)
   for (i = 0; i < BQ7693_NUM_CELLS; ++i)
   {
     if (v[i] < v_min)
-      v_min = v[i];
+    {
+      v_min    = v[i];
+      min_cell = (uint8_t)i;
+    }
     if (v[i] > v_max)
     {
       v_max    = v[i];
@@ -766,6 +770,7 @@ bool bq7693_balance_update(bq7693_balance_status_t *status)
   status->v_max_mv  = v_max;
   status->spread_mv = (uint16_t)(v_max - v_min);
   status->max_cell  = max_cell;
+  status->min_cell  = min_cell;
   status->cell_mask = 0;
   status->num_cells = 0;
 

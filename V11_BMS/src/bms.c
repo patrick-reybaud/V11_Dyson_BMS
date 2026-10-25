@@ -802,6 +802,85 @@ static void bms_balance_hw_result(bool ok)
   }
 }
 
+/* This charge has had its weak-cell verdict. Cleared when the motor runs, and
+   RAM-only: SHIP mode restarts the MCU, which also starts a new charge. */
+static bool                    bms_weak_cell_judged   = false;
+
+/**
+ * @brief Feed one settled balancing decision to the weak-cell tracker.
+ *
+ * Only the first decisive verdict of a charge counts - balanced, or a cell
+ * that needs bleeding - and BQ_BALANCE_IDLE reached at any point arms the next
+ * charge's verdict, which then measures drift alone rather than an imbalance
+ * the balancer had not finished with. See CELL_WEAK_REGROW_MV.
+ */
+static void bms_weak_cell_track(const bq7693_balance_status_t *st)
+{
+  const uint32_t before   = eeprom_data.weak_cell;
+  uint8_t        cell     = WEAK_CELL_GET_CELL(before);
+  uint8_t        count    = WEAK_CELL_GET_COUNT(before);
+  bool           balanced = WEAK_CELL_BALANCED(before);
+
+  if (st->state == BQ_BALANCE_IDLE)
+  {
+    //A charge that opens balanced breaks the streak.
+    if (!bms_weak_cell_judged)
+    {
+      bms_weak_cell_judged = true;
+      cell  = WEAK_CELL_NONE;
+      count = 0;
+    }
+    balanced = true;
+  }
+  else if (st->state == BQ_BALANCE_ACTIVE && !bms_weak_cell_judged)
+  {
+    bms_weak_cell_judged = true;
+    if (balanced)
+    {
+      if (st->spread_mv >= CELL_WEAK_REGROW_MV)
+      {
+        count = (cell == st->min_cell && count < 0xFFu) ? (uint8_t)(count + 1u) : 1u;
+        cell  = st->min_cell;
+      }
+      else
+      {
+        cell  = WEAK_CELL_NONE;
+        count = 0;
+      }
+      BMS_PRINT("BMS:BAL_DRIFT c%u d=%umV n=%u\r\n", st->min_cell, st->spread_mv, count);
+    }
+    balanced = false;
+  }
+  else
+  {
+    return;
+  }
+
+  eeprom_data.weak_cell = WEAK_CELL_MAKE(cell, count, balanced);
+  if (eeprom_data.weak_cell == before)
+    return;
+
+  //Diagnostic only: a failed write is logged, it does not fault the pack.
+  if (eeprom_write() == EEPROM_WRITE_FAILED)
+    BMS_PRINT("BMS:WEAK_CELL write failed\r\n");
+
+  if (count >= CELL_WEAK_CYCLES && cell != WEAK_CELL_NONE)
+    BMS_PRINT("BMS:WEAK_CELL c%u n=%u\r\n", cell, count);
+}
+
+/** @brief Report a cell flagged by bms_weak_cell_track(): log, and blink the right LED. */
+static void bms_weak_cell_report(void)
+{
+  const uint8_t cell  = WEAK_CELL_GET_CELL(eeprom_data.weak_cell);
+  const uint8_t count = WEAK_CELL_GET_COUNT(eeprom_data.weak_cell);
+
+  if (cell == WEAK_CELL_NONE || count < CELL_WEAK_CYCLES)
+    return;
+
+  BMS_PRINT("BMS:WEAK_CELL c%u n=%u\r\n", cell, count);
+  leds_blink_leds_num(LEDS_LED_ERR_RIGHT, 6, 150);
+}
+
 /** @brief True while the balancer has a channel on: a normal bleed, or the OV-guard bleed. */
 static bool bms_balance_bleeding(void)
 {
@@ -883,6 +962,8 @@ static bool bms_balance_tick(void)
   }
 
   bms_balance_hw_result(hw_ok);
+  if (hw_ok)
+    bms_weak_cell_track(&bms_balance_status);
 
   // Only log on a change, otherwise a multi-hour balance floods the debug queue.
   if (   bms_balance_status.state     != bms_balance_last_state
@@ -1025,11 +1106,18 @@ static void bms_set_error(enum BMS_ERROR_CODE code)
 
 #if (TRIGGER_TOGGLE_MODE != 0)
 /*
- * The latch behind TRIGGER_TOGGLE_MODE 1 and 2. File scope so that the states
+ * The latch behind TRIGGER_TOGGLE_MODE 1, 2 and 3. File scope so that the states
  * which must drop it - a fault, a charger - can, see bms_trigger_latch_clear().
  */
 static bool     bms_trigger_latched     = false;
 static sw_timer bms_trigger_latch_timer = 0;
+#if (TRIGGER_TOGGLE_MODE == 3)
+/* First tap seen, waiting TRIGGER_DOUBLE_TAP_MS for the second press. */
+static bool     bms_trigger_tap_pending = false;
+static sw_timer bms_trigger_tap_timer   = 0;
+/* The press that stopped a latched motor: reads as released until let go. */
+static bool     bms_trigger_swallow     = false;
+#endif
 
 /** @brief Set or clear the latch, starting TRIGGER_LATCH_MAX_MS as it is set. */
 static void bms_trigger_latch_set(bool on)
@@ -1045,6 +1133,9 @@ static void bms_trigger_latch_set(bool on)
 static void bms_trigger_latch_clear(void)
 {
   bms_trigger_latched = false;
+#if (TRIGGER_TOGGLE_MODE == 3)
+  bms_trigger_tap_pending = false;
+#endif
 }
 
 /**
@@ -1067,6 +1158,9 @@ static void bms_trigger_latch_expire(void)
   if (!dsn_prot_get_vacuum_connected() || dio_read(DIO_CHARGER_CONNECTED))
   {
     bms_trigger_latched = false;
+#if (TRIGGER_TOGGLE_MODE == 3)
+    bms_trigger_tap_pending = false;
+#endif
   }
   else if (bms_trigger_latched
            && sw_timer_is_elapsed(&bms_trigger_latch_timer, TRIGGER_LATCH_MAX_MS))
@@ -1147,6 +1241,80 @@ static bool bms_trigger_active(void)
   prev_level = level;
 
   return (bms_trigger_latched || (level != 0u));
+
+#elif (TRIGGER_TOGGLE_MODE == 3)
+  /*
+   * Double tap latches, single press stops.
+   *
+   *   stopped, press        -> runs while held, as mode 0.
+   *   tap, tap              -> latched on the release of the second tap. The
+   *                            motor keeps running through the gap between
+   *                            them, so it does not stop and restart.
+   *   tap, nothing          -> stops TRIGGER_DOUBLE_TAP_MS after the release.
+   *   latched, any press    -> stops on the press itself, and that press reads
+   *                            as released until it is let go, so holding it
+   *                            does not restart the motor.
+   */
+  static bool     was_long   = false;
+  static bool     second     = false;
+  static uint8_t  prev_level = 0;
+  static sw_timer held_timer = 0;
+
+  uint8_t level = dio_read(DIO_TRIGGER_PRESSED);
+
+  bms_trigger_latch_expire();
+
+  if (bms_trigger_tap_pending
+      && sw_timer_is_elapsed(&bms_trigger_tap_timer, TRIGGER_DOUBLE_TAP_MS))
+  {
+    bms_trigger_tap_pending = false;
+  }
+
+  if (level && !prev_level)          /* pressed */
+  {
+    if (bms_trigger_latched)
+    {
+      bms_trigger_latch_set(false);
+      bms_trigger_swallow = true;
+    }
+    second = bms_trigger_tap_pending;
+    bms_trigger_tap_pending = false;
+    was_long = false;
+    sw_timer_start(&held_timer);
+  }
+  else if (!level && prev_level)     /* released */
+  {
+    if (bms_trigger_swallow)
+    {
+      bms_trigger_swallow = false;
+    }
+    else if (!was_long)
+    {
+      if (second)
+      {
+        bms_trigger_latch_set(true);
+      }
+      else
+      {
+        bms_trigger_tap_pending = true;
+        sw_timer_start(&bms_trigger_tap_timer);
+      }
+    }
+    second = false;
+  }
+  else if (level)                    /* still held */
+  {
+    if (sw_timer_is_elapsed(&held_timer, TRIGGER_HOLD_MS))
+    {
+      was_long = true;
+    }
+  }
+  prev_level = level;
+
+  if (bms_trigger_swallow)
+    return false;
+
+  return (bms_trigger_latched || bms_trigger_tap_pending || (level != 0u));
 
 #else
   return dio_read(DIO_TRIGGER_PRESSED);
@@ -1949,6 +2117,9 @@ static void bms_handle_idle(void)
 
     if (dio_read(DIO_CHARGER_CONNECTED) == true)
     {
+#if CELL_BALANCE_ENABLE
+      bms_weak_cell_report();
+#endif
       bms_state = BMS_CHARGER_CONNECTED;
       return;
     }
@@ -2114,6 +2285,10 @@ static void bms_handle_vacuum_running(void)
 
   //Never bleed cells while the motor is drawing current.
   bms_balance_stop();
+#if CELL_BALANCE_ENABLE
+  //The pack is being used: the next charge gets a fresh weak-cell verdict.
+  bms_weak_cell_judged = false;
+#endif
 
   if (!bms_is_safe_to_discharge())
   {
